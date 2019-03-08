@@ -1,0 +1,129 @@
+'''
+Created on 2019年3月5日
+
+@author: User
+'''
+from datetime import datetime
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from statsmodels.tsa.stattools import adfuller
+from statsmodels.graphics.tsaplots import plot_acf,plot_pacf
+from statsmodels.tsa.arima_model import ARMA
+import matplotlib
+from numpy import sum, mean, poly, polyfit
+from _operator import index
+from scipy.ndimage.morphology import black_tophat
+from dataclasses import _init_param
+import queue
+from sklearn.preprocessing import StandardScaler,MinMaxScaler
+
+#指定默认字体
+matplotlib.rcParams['font.sans-serif'] = ['SimHei']
+matplotlib.rcParams['font.family']='sans-serif'
+#解决负号'-'显示为方块的问题
+matplotlib.rcParams['axes.unicode_minus'] = False
+
+def CalculatePip(ts_temp):
+    #选出这段时间序列中dis 最大的点
+    imp_pos=[]
+    length=len(ts_temp)
+    for i in range(1,length-1):
+        dis=np.abs(ts_temp[0]+(ts_temp[-1]-ts_temp[0])*i/(length-1)-ts_temp[i])
+        imp_pos.append([i,dis])
+    imp_pos.sort(key=lambda x:x[1],reverse=True)
+    
+    #计算累计误差total_err
+    z1=np.polyfit([0,imp_pos[0][0],length-1],[ts_temp[0],imp_pos[0][1],ts_temp[-1]],deg=1)
+    p1=np.poly1d(z1)
+    total_err=0
+    for i in range(length):
+        total_err+=np.abs(ts_temp[i]-p1(i))
+  
+    return imp_pos[0],total_err
+
+def CalculateErr(ts_temp):
+    #计算拟合误差
+    z1=np.polyfit([0,len(ts_temp)-1],[ts_temp[0],ts_temp[-1]],deg=1)
+    p1=np.poly1d(z1)
+    total_err=0
+    for i in range(len(ts_temp)):
+        total_err+=np.abs(ts_temp[i]-p1[i])
+    return total_err
+
+  
+def plr_fpip(ts,e,k):
+    ts=scale_data(ts)
+    
+    fpip=[]
+    fpip.append(0)
+    fpip.append(len(ts)-1)
+    q=queue.Queue()
+    q.put(0)
+    q.put(len(ts))
+    while((not q.empty()) and (len(fpip)<k)):
+        stpos=q.get()
+        endpos=q.get()
+#         print('要划分的序列段：',ts[stpos:endpos])
+        if len(ts[stpos:endpos])<3:
+            continue
+        segpos,total_err=CalculatePip(ts[stpos:endpos])
+        segpos[0]+=stpos
+#         print(segpos,total_err)
+        if total_err>e:
+            fpip.append(segpos[0])
+         
+#         print('左边序列：',ts[stpos:(segpos[0]+1)])
+#         print('右边序列：',ts[segpos[0]:endpos])
+#         print('重要点：',fpip)
+        lef_err=CalculateErr(ts[stpos:(segpos[0]+1)])
+        right_err=CalculateErr(ts[segpos[0]:endpos])
+         
+        if lef_err>right_err:
+            q.put(stpos)
+            q.put(segpos[0]+1)
+            q.put(segpos[0])
+            q.put(endpos)
+             
+        else:
+            q.put(segpos[0])
+            q.put(endpos)
+            q.put(stpos)
+            q.put(segpos[0]+1)
+#     fpip=sorted(list(filter(None,fpip)))             #注意函数使用规范  
+#     fpip.insert(0, 0)    
+    fpip.sort()
+    return fpip              
+
+def scale_data(ts):
+    #归一化数据
+    df.index=ts.index
+    values=ts.values
+    values=values.reshape(len(values),1)
+    scaler=MinMaxScaler(feature_range=(0,1))
+    scaler.fit(values)
+    normolized=scaler.transform(values)
+    return pd.Series(normolized.reshape(len(values)),df.index)
+
+#使用AirPassenger数据集
+df = pd.read_csv('D:/Projects/time-series-analysis/AirPassengers.csv', encoding='utf-8', index_col='TravelDate')
+df.index = pd.to_datetime(df.index)  # 将字符串索引转换成时间索引
+ts = df['Passengers']  # 生成pd.Series对象
+
+#重新采样
+#ts=ts.resample('5min').asfreq()
+#ts.fillna(method='bfill',inplace=True)
+
+#调用函数
+fpip=plr_fpip(ts, e=60, k=20)
+print(fpip)
+
+#绘图
+f=plt.plot(facecolor='white')
+x=range(len(ts))
+plt.plot(x,ts,color='blue',label='Original')
+plt.plot(fpip,ts[fpip],color='red',label='PLR')
+plt.legend(loc='best')
+plt.title("转台-电机温度")
+plt.show()
+ 
