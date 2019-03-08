@@ -1,0 +1,202 @@
+'''
+Created on 2019年2月28日
+
+@author: User
+'''
+from datetime import datetime
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from statsmodels.tsa.stattools import adfuller
+from statsmodels.graphics.tsaplots import plot_acf,plot_pacf
+from statsmodels.tsa.arima_model import ARMA
+import matplotlib
+from numpy import sum
+from _operator import index
+from scipy.ndimage.morphology import black_tophat
+from dataclasses import _init_param
+
+#指定默认字体
+matplotlib.rcParams['font.sans-serif'] = ['SimHei']
+matplotlib.rcParams['font.family']='sans-serif'
+#解决负号'-'显示为方块的问题
+matplotlib.rcParams['axes.unicode_minus'] = False
+
+df=pd.read_csv('D:/Projects/zhuantai/zhuantai-data-demo/zhuantai-data-utf8.csv',encoding='utf-8',index_col='时间')
+# 删除数据特别大的行
+#先清理角速度
+delete_index=df[df['角速度']==9999999999].index
+df.drop(index=delete_index,inplace=True)
+# print(df.head(5))
+
+#dataframe的index有重复值，去掉
+df=df[~df.index.duplicated(keep='first')]
+# print(df.head(5))
+
+df.index=pd.to_datetime(df.index)
+ts=df['电机温度']
+# ts=ts['2017-11-08 18:03:00':'2017-11-9 13:05:00']
+# print(ts.head(),ts.head().index)
+
+#重新采样
+# ts=ts.resample('5min').asfreq()
+# ts.fillna(method='bfill',inplace=True)
+
+#时间序列平稳性检验模块
+class test_stationarity:
+    #移动平均图
+    def draw_trend(self,timeSeries,size):
+        f=plt.figure(facecolor='white')
+        rol_mean=timeSeries.rolling(window=size).mean()
+        rol_weighted_mean=timeSeries.ewm(span=size).mean()
+         
+        timeSeries.plot(color='blue',label='Original')
+        rol_mean.plot(color='red',label='Rolling Mean')
+        rol_weighted_mean.plot(color='black',label='Rolling Weighted Mean')
+        plt.legend(loc='best')
+        plt.title('Roll Mean')
+        plt.show()
+     
+    #观察法，通俗的说就是通过观察序列的趋势图与相关图是否随着时间的变化呈现出某种规律
+    def draw_ts(self,ts):
+        f=plt.figure(facecolor='white')
+        ts.plot(color='blue')
+        plt.show()
+         
+    #单位根检验：ADF是一种常用的单位根检验方法
+    def test_Stationarity(self,ts):
+        adf_test=adfuller(ts)
+        results=pd.Series(adf_test[0:4],index=['Test Statistic','p-value','#Lags Used','Number of Observations Used'])
+        for name,item in adf_test[4].items():
+            results['Critical Value (%s)' %name]=item
+        return results
+     
+    #平稳的序列自相关图和偏自相关图不是拖尾就是截尾
+    def acf_and_pacf(self,ts,lags=31):
+        f=plt.figure(facecolor='white')
+        ax1=f.add_subplot(211)
+        plot_acf(ts, ax=ax1, lags=lags)
+        ax2=f.add_subplot(212)
+        plot_pacf(ts, ax=ax2, lags=lags)
+        plt.show()
+         
+ 
+#实例化平稳性分析       
+a_test_stationarity=test_stationarity()
+# a_test_stationarity.draw_trend(timeSeries=ts, size=100) 
+# a_test_stationarity.draw_ts(ts_per_min)       
+# adf_results=a_test_stationarity.test_Stationarity(ts)
+# print(adf_results)
+# a_test_stationarity.acf_and_pacf(ts=ts)   
+ 
+#平稳性处理:对数变换、平滑法、差分、分解
+ts_log=np.log(ts)
+# a_test_stationarity.draw_ts(ts_log)
+# a_test_stationarity.acf_and_pacf(ts_log, lags=31)
+# print(a_test_stationarity.test_Stationarity(ts_log))
+ 
+#差分
+# diff12=ts_log.diff(1)
+# diff12.dropna(inplace=True)
+# diff12_1=diff12.diff(1)
+# diff12_1.dropna(inplace=True)
+# print(a_test_stationarity.test_Stationarity(diff12))
+ 
+#分解：将时序数据分离成不同的成分-长期趋势、季节趋势和随机成分
+#从结果看出，长期趋势占最主要部分，季节趋势和随即成分极小
+#得到不同的分解成分后，就可以使用时间序列模型对各个成分进行拟合，当然也可以选择其他预测方法
+#小波对时序数据进行过分解，然后分别采用时间序列拟合，效果还不错。小波、傅里叶、卡尔曼滤波
+#可以将时序数据进行更加准确的分解，由于分解后的时序数据避免了他们在建模时的交叉影响，将有助于预测准确性的提高
+# from statsmodels.tsa.seasonal import seasonal_decompose
+# decomposition=seasonal_decompose(ts_log, model='additive',freq=2)
+# trend=decomposition.trend
+# seasonal=decomposition.seasonal
+# residual=decomposition.resid
+# f=plt.figure(facecolor='white')
+# ax1=f.add_subplot(411)
+# ts_log.plot(color='blue',ax=ax1)
+# plt.title('Original')
+# ax2=f.add_subplot(412)
+# trend.plot(color='red',ax=ax2)
+# plt.title('Trend')
+# ax3=f.add_subplot(413)
+# seasonal.plot(color='black',ax=ax3)
+# plt.title('Seasonal')
+# ax4=f.add_subplot(414)
+# residual.plot(color='green',ax=ax4)
+# plt.title('Residual')
+# plt.show()
+# print('Decomposition is ok')
+ 
+# #模型识别：周期成分使用窗口为12的移动平进行处理，长期趋势成分采用1阶差分来进行处理
+roll_mean=ts_log.rolling(window=12).mean()
+roll_mean.dropna(inplace=True)
+ts_diff1=roll_mean.diff(1)
+ts_diff1.dropna(inplace=True)
+# ts_diff2=ts_diff1.diff(1)
+# ts_diff2.dropna(inplace=True)
+# print(a_test_stationarity.test_Stationarity(ts_diff1))
+# a_test_stationarity.acf_and_pacf(ts_diff1, lags=32)
+
+#利用BIC准则调参：依据BIC准则识别模型的p, q值，通常认为BIC值越小的模型相对更优。这里我简单介绍一下BIC准则：
+#它综合考虑了残差大小和自变量的个数，残差越小BIC值越小，自变量个数越多BIC值越大。
+def proper_model(data_ts,maxLag):
+    init_bic=np.inf
+    init_p=0
+    init_q=0
+    init_model=None
+    for p in range(maxLag):
+        for q in range(maxLag):
+            model=ARMA(data_ts,order=(p,q))
+            try:
+                results_ARMA=model.fit(disp=False,method='css')
+            except:
+                continue
+            
+            bic=results_ARMA.bic
+            if bic<init_bic:
+                init_bic=bic
+                init_p=p
+                init_q=q
+                init_model=model
+    return init_bic,init_p,init_q,init_model
+
+_,best_p,best_q,_=proper_model(ts_diff1, maxLag=5)
+print('BIC准则进行参数选择，最佳结果是：'+'q='+str(best_p)+'  q='+str(best_q))
+model=ARMA(ts_diff1,order=(best_p,best_q))
+arma_results=model.fit(disp=-1,method='css')
+#   
+#模型预测：由于ARMA拟合的是经过相关预处理后的数据，故其预测值需要通过相关逆变换进行还原。
+predict_ts=arma_results.predict()
+# f=plt.figure(facecolor='white')
+# ax1=f.add_subplot(211)
+# predict_ts.plot(color='black',ax=ax1)
+# plt.title('Predict_log')
+# ax2=f.add_subplot(212)
+# ts_diff1.plot(color='blue',ax=ax2)
+# plt.title('Original_log')
+# plt.show()
+
+#一阶差分还原
+diff_shift_ts=roll_mean.shift(1)
+diff_recover1=predict_ts.add(diff_shift_ts)
+#滑动平均还原
+roll_sum=ts_log.rolling(window=11).sum()
+roll_recover=diff_recover1*12-roll_sum.shift(1)
+# f=plt.figure(facecolor='white')
+# roll_recover.plot(color='black')
+# plt.show()
+#对数还原
+log_recover=np.exp(roll_recover)
+log_recover.dropna(inplace=True)
+# f=plt.figure(facecolor='white')
+# log_recover.plot(color='black')
+# plt.show()
+   
+#使用均方根误差（RMSE）来评估模型样本内拟合的好坏
+ts=ts[log_recover.index]
+plt.figure(facecolor='white')
+log_recover.plot(color='red',label='Predict')
+ts.plot(color='blue',label='Original')
+plt.title('RMSE: %.4f' %np.sqrt(sum((log_recover-ts)**2/ts.size)))
+plt.show()
