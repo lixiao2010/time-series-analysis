@@ -1,0 +1,143 @@
+#-*-coding:utf-8-*-
+import numpy as np
+import math
+float_formatter=lambda x:'%.2f' %x
+np.set_printoptions(formatter={'float_kind':float_formatter})
+
+#在传统算法中，可以用余弦相似度和pearson相关系数来描述两个序列的相似度。但是时间序列比较特殊，可能存在两个问题：
+#两段时间序列长度不同。如何求相似度？
+# 一个序列是另一个序列平移之后得到的。如何求相似距离？
+# 第一个问题，导致了根本不能用余弦相似度和pearson相关系数来求解相似。第二个问题，导致了也不能基于欧式距离这样的算法，来求解相似距离
+
+# 定义一个类，类中不同的方法代表DTW的不同实现方法
+class timeseriessimilarity:
+    #DTW最简单的实现
+    def TimeSeriesSimilarity(self,s1,s2):
+        l1=len(s1)
+        l2=len(s2)
+        paths=np.full((l1+1,l2+1),np.inf)
+        paths[0,0]=0
+
+        for i in range(l1):
+            for j in range(l2):
+                dist=s1[i]-s2[j]
+                cost=dist**2
+                paths[i+1,j+1]=cost+min(paths[i+1,j],paths[i,j+1],paths[i,j])          #动态规划
+
+        paths=np.sqrt(paths)
+        s=paths[l1,l2]
+        return s,paths.T
+
+    #其实在实际使用中，我们发现该算法对周期序列的距离计算不是很好。尤其两个序列是相同周期，但是是平移后的序列。
+    #改进策略1:目的是想求得一个惩罚系数α ，这个α 和原算法的distance相乘，得到更新后的distance。
+    #求和后开发表示一个长度系数，这个长度系数越大，表示对角直线越长。
+    #https://blog.csdn.net/xsdxs/article/details/86648605
+    def best_path(self,paths):
+        '''Compute the optimal path from the nxm warping paths matrix'''
+        i,j=int(paths.shape[0]-1),int(paths.shape[1]-1)
+        p=[]
+        if paths[i,j]!=-1:
+            p.append((i-1,j-1))
+        #不太理解该处含义
+        while i>0 and j>0:
+            c=np.argmin([paths[i-1,j-1],paths[i-1,j],paths[i,j-1]])                #注意中括号
+            if c==0:
+                i,j=i-1,j-1
+            elif c==1:
+                i=i-1
+            elif c==2:
+                j=j-1
+            if paths[i,j]!=-1:
+                p.append((i-1,j-1))
+        p.pop()
+        p.reverse()
+        return p
+
+    def get_common_seq(self,best_path,threshold=1):
+        #计算每段对角直线的长度
+        com_ls=[]
+        pre=best_path[0]
+        length=1
+        for i,_ in enumerate(best_path):
+            if i==0:
+                continue   #注意用法
+            cur=best_path[i]
+            if cur[0]==pre[0]+1 and cur[1]==pre[1]+1:
+                length+=1
+            else:
+                com_ls.append(length)
+                length=1
+            pre=cur
+        com_ls.append(length)
+        return list(filter(lambda num:True if threshold<num else False,com_ls))        #注意用法
+
+    def calculate_attenuate_weight(self,seqLen,com_ls):
+        #计算衰减系数α
+        weight=0
+        for item in com_ls:
+            weight=weight+(item*item)/(seqLen*seqLen)
+        return 1-math.sqrt(weight)                      #衰减系数计算公式，对角直线越长，则衰减系数越小。
+
+    #另一种惩罚系数α求解方法：先求解两个序列seq1和seq2的最长公共子串，长度记为a
+    #因为seq1和seq2是数值序列，在求最长公共子串时，设置了一个最大标准差的偏移容忍。也就是说，两个数值在这个标准差内，认为也是公共子串中的一部分。
+    def TimeSeriesSimilarityImprove(self,s1,s2):
+        std=np.std(s1,ddof=1) if np.std(s1,ddof=1)>np.std(s2,ddof=1) else np.std(s2,ddof=1)
+        l1=len(s1)
+        l2=len(s2)
+        paths=np.full((l1+1,l2+1),np.inf)
+        sub_matrix=np.full((l1,l2),0)
+        max_sub_len=0
+
+        paths[0,0]=0
+        for i in range(l1):
+            for j in  range(l2):
+                dist=s1[i]-s2[j]
+                cost=dist**2
+                paths[i+1,j+1]=cost+min(paths[i,j+1],paths[i+1,j],paths[i,j])
+
+                if np.abs(dist)<std:
+                    if i==0 or j==0:
+                        sub_matrix[i,j]=1
+                    else:
+                        sub_matrix[i,j]=sub_matrix[i-1,j-1]+1
+                        max_sub_len=sub_matrix[i,j] if sub_matrix[i,j]>max_sub_len else max_sub_len
+
+        paths=np.sqrt(paths)
+        s=paths[i,j]
+        return s,paths.T,[max_sub_len]                 #注意'numpy.int32' object is not iterable
+
+    def cal_attenuate_weight_improve(self,seqLen1,seqLen2,com_ls):
+        weight=0
+        for item in com_ls:
+            weight+=(item/seqLen1)*(item/seqLen2)
+        return 1-weight           #衰减系数计算公式，两个数值序列的最长公共子串越长，则衰减系数越小。
+
+#测试
+# s1 = [1, 2, 0, 1, 1, 2]
+# s2 = [1, 0, 1]
+s1 = np.array([1, 2, 0, 1, 1, 2, 0, 1, 1, 2, 0, 1, 1, 2, 0, 1])
+s2 = np.array([0, 1, 1, 2, 0, 1, 1, 2, 0, 1, 1, 2, 0, 1, 1, 2])
+s3 = np.array([0.8, 1.5, 0, 1.2, 0, 0, 0.6, 1, 1.2, 0, 0, 1, 0.2, 2.4, 0.5, 0.4])
+
+a_timeseriessimilarity=timeseriessimilarity()
+distance12,paths12=a_timeseriessimilarity.TimeSeriesSimilarity(s1,s2)
+distance13,paths13=a_timeseriessimilarity.TimeSeriesSimilarity(s1,s3)
+print('更新前s1和s2的距离：'+str(distance12))
+print('更新前s1和s3的距离：'+str(distance13))
+
+best_path12=a_timeseriessimilarity.best_path(paths12)
+best_path13=a_timeseriessimilarity.best_path(paths13)
+com_seq12=a_timeseriessimilarity.get_common_seq(best_path12)
+com_seq13=a_timeseriessimilarity.get_common_seq(best_path13)
+weight12=a_timeseriessimilarity.calculate_attenuate_weight(len(best_path12),com_seq12)
+weight13=a_timeseriessimilarity.calculate_attenuate_weight(len(best_path13),com_seq13)
+# print(distance12,'\n',paths12,'\n',paths12.shape,'\n',best_path12,'\n',com_seq12,'\n',weight12)
+print('更新后s1和s2的距离：'+str(distance12*weight12))
+print('更新后s1和s3的距离：'+str(distance13*weight13))
+
+distance12_i,paths12_i,max_sub_len12=a_timeseriessimilarity.TimeSeriesSimilarityImprove(s1,s2)
+distance13_i,paths13_i,max_sub_len13=a_timeseriessimilarity.TimeSeriesSimilarityImprove(s1,s3)
+weight12_i=a_timeseriessimilarity.cal_attenuate_weight_improve(len(s1),len(s2),max_sub_len12)
+weight13_i=a_timeseriessimilarity.cal_attenuate_weight_improve(len(s1),len(s3),max_sub_len13)
+print('更新后s1和s2的距离_improved：'+str(distance12_i*weight12_i))
+print('更新后s1和s3的距离_improved：'+str(distance13_i*weight13_i))
