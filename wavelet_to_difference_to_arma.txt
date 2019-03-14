@@ -1,0 +1,245 @@
+﻿#小波去噪-小波变换-平稳性检验-差分-建模-预测-小波还原：结果有问题，因为原始数据有一个长度，小波变换后参数也有一个长度，这两个长度一一对应，如果用了差分，那么预测只能到差分shift的长度，
+#也就是说，差分的长度要和（所有原始数据变换后参数长度-训练集数据变换后参数长度）一致，最后结果才能还原。
+#同时要注意结构化数据，也就是时间序列的索引问题
+#基于小波变换的时间序列预测：小波变换，得到参数，预测参数（长度为变换后的参数长度），还原——没有涉及到差分、ARMA
+#ARMA预测GDP的python实现：差分-ARMA预测-将差分结果还原（有滞后）——没有涉及到小波变换
+#模型太复杂，最终预测结果不好，可能将差分和小波放在一起不太合适
+#下一步尝试小波分析后，平稳序列用ARMA模型预测，不平稳序列用其他方法如SVR预测
+
+'''
+Created on 2019年3月8日
+
+@author: User
+'''
+from datetime import datetime
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from statsmodels.tsa.stattools import adfuller
+from statsmodels.graphics.tsaplots import plot_acf,plot_pacf
+from statsmodels.tsa.arima_model import ARMA
+import matplotlib
+from numpy import sum
+from _operator import index
+from scipy.ndimage.morphology import black_tophat
+import pywt
+from statsmodels.tsa.ar_model import AR
+from statsmodels.tsa.arima_model import ARIMA
+import statsmodels.api as sm
+
+#指定默认字体
+matplotlib.rcParams['font.sans-serif'] = ['SimHei']
+matplotlib.rcParams['font.family']='sans-serif'
+#解决负号'-'显示为方块的问题
+matplotlib.rcParams['axes.unicode_minus'] = False
+
+
+#静态时间序列的小波去噪
+def my_Wavelets(data,wavefunc,ln,m,n):  #wavefunc为选取的小波函数，ln为分解层数，m,n则选择了进行阈值处理的小波系数层数
+    #分解
+    coeff=pywt.wavedec(data=data,wavelet=wavefunc,mode='symmetric',level=ln)  ## 按 level 层分解，使用pywt包进行计算，返回list[cAn, cDn, cDn-1, …, cD2, cD1] cAn是尺度系数 cDn为小波系数
+
+    #符号函数
+    sgn=lambda x:1 if x>0 else -1 if x<0 else 0
+
+    #去噪：非线性阈值处理法——非线性阈值处理法又称小波收缩法，其基本原理是基于小波变换的集中能力。即通过小波变换后有用信号的能量集中于少数小波系数上，
+    # 而白噪声在小波变换域上仍然分散在大量小波系数智商。因而相对来说，有用信号的小波系数值必然大于那些能量分散且幅值较小的噪声的小波系数值。因此，从谱的幅度上（而不是谱的位置）看，有用信号和噪声可以实现分离。
+    for i in range(m,n+1):      #选取小波系数层数为 m~n层，尺度系数不需要处理
+        cD=coeff[i]
+        for j in range(len(cD)):
+            Tr=np.sqrt(2*np.log(len(cD)))     #计算阈值
+            if cD[j]>Tr:
+                coeff[i][j]=sgn(cD[j])-Tr
+            else:coeff[i][j]=0
+
+    #重构
+    denoised_data=pywt.waverec(coeffs=coeff,wavelet=wavefunc,mode='symmetric')
+    denoised_data=pd.Series(denoised_data,index=data.index)
+
+    #画图
+    f=plt.figure(facecolor='white')
+    data.plot(color='blue',legend='Origin')
+    denoised_data.plot(color='red',legend='Denoised')
+    plt.legend(loc='best')
+    plt.show()
+
+
+#基于小波变换的时间序列预测
+def predict_with_Wavelets(data,predit_length): #对于差分后的结果，而不是原数据来说，预测长度等于diff长度，因为用到了差分处理，而差分还原是需要前shift步数据的
+    data_for_train=data[:-predit_length]
+    data_for_predict=data[-predit_length:]
+    
+    #分解
+    A2,D2,D1=pywt.wavedec(data_for_train, wavelet='db1', mode='symmetric',level=2)
+    coeff=[A2,D2,D1]
+    data_predicted1=pywt.waverec(coeff, wavelet='db1', mode='symmetric')
+ 
+    #求出每个小波系数ARMA模型需要预测多少步。方法就是查看所有数据小波分解后的系数个数并求出差值
+    #对所有序列进行分解
+    A2_all,D2_all,D1_all=pywt.wavedec(data,wavelet='db1',level=2)
+    coeff_all=[A2_all,D2_all,D1_all]
+    global delta_length
+    global window
+    delta_length=[len(A2_all)-len(A2),len(D2_all)-len(D2),len(D1_all)-len(D1)]
+    window=12
+     
+    #平稳性处理
+    diff_flag=[]
+    roll_mean=[]
+    coeff_diff=[]
+    for i,item in enumerate(coeff):
+        item=pd.Series(item)
+        diff_flag_temp,coeff_diff_temp,roll_mean_temp=difference(item, window=12,delta_length=delta_length[i])
+        diff_flag.append(diff_flag_temp)
+        roll_mean.append(roll_mean_temp)
+        coeff_diff.append(coeff_diff_temp)
+    
+    #对各层系数建立ARMA模型并重构
+    #求解ARMA模型系数
+    order=[]
+    for item in coeff_diff:
+        order_temp=sm.tsa.arma_order_select_ic(item,ic='aic')['aic_min_order']
+        order.append(order_temp)
+    
+    #对每层系数建立ARMA模型
+    model_A2=ARMA(coeff_diff[0],order=order[0])
+    model_D2=ARMA(coeff_diff[1],order=order[1])
+    model_D1=ARMA(coeff_diff[2],order=order[2])
+    
+    model=[model_A2,model_D2,model_D1]
+    
+    result_A2=model_A2.fit()
+    result_D2=model_D2.fit()
+    result_D1=model_D1.fit()
+    
+    result=[result_A2,result_D2,result_D1]
+    #差分数据还原
+    fittedvalue=[]
+    for i,item in enumerate(diff_flag):
+        if item:
+            predict=result[i].predict()
+            fittedvalue_temp=rec_diff(ts=coeff[i], roll_mean=roll_mean[i], predicted_ts=predict, window=12)
+            fittedvalue.append(fittedvalue_temp)
+        else:
+            fittedvalue.append(result[i].fittedvalues)
+
+    #画出每层的拟合曲线
+    plt.figure(figsize=(10,15))
+    plt.subplot(3,1,1)
+    plt.plot(A2,color='blue')
+    plt.plot(fittedvalue[0],color='red')
+    plt.title('A2')
+     
+    plt.subplot(3,1,2)
+    plt.plot(D2,color='blue')
+    plt.plot(fittedvalue[1],color='red')
+    plt.title('D2')
+     
+    plt.subplot(3,1,3)
+    plt.plot(D1,color='blue')
+    plt.plot(fittedvalue[2],color='red')
+    plt.title('D1')
+    plt.show()
+
+    
+    #预测小波系数，所有数据长度
+    pX=[]
+    roll_mean_s=[]
+    pX_r=[]
+    predicted=[]
+    
+    for i,item in enumerate(diff_flag):
+        if item:
+            sta=2*delta_length[i]+window
+            p_X=model[i].predict(result[i].params,start=sta,end=len(coeff_all[i]))
+            print(len(p_X))
+            pX.append(p_X)
+            roll_mean_d=roll_mean[i].shift(delta_length[i])
+            roll_mean_d.dropna(inplace=True)
+            roll_mean_s.append(roll_mean_d)
+            pX_s=pX[i]+roll_mean_s[i]
+            pX_r=coeff[i][:sta].tolist()
+            pX_s= pX_s.tolist()
+            pX_r.extend(pX_s)
+            predicted.append(pX_r)
+        else:
+            p_X=model[i].predict(result[i].params,start=1,end=len(coeff_all[i])+delta_length[i])
+            predicted.append(p_X)
+             
+    coeff_new=[predicted[0],None,None]
+    print(coeff_new)
+    #预测(不用重构，直接预测相加，单个recovery)
+    data_predicted=pywt.waverec(coeff_new, wavelet='db1', mode='symmetric')
+    data_p_index=pd.date_range(data.index[16],periods=len(data_predicted),freq='1s')
+    data_predicted=pd.Series(data_predicted,index=data_p_index)
+    print('data_predicted length is:',len(data_predicted))
+     
+     
+    #绘图
+    plt.figure(figsize=(15,5))
+    plt.plot(data.values,'blue')
+    plt.plot(data_predicted.values,'red')
+    plt.show()
+
+#平稳性处理：需要先对数据进行平稳性检验和平稳性处理，否则用ARMA模型会报错
+#平稳性检验
+def test_Stationarity(ts):
+    adf_test=adfuller(ts)
+    results_adf=pd.Series(adf_test[0:4],index=['Test Statistic','p-value','#Lags Used','Number of Observations Used'])
+    for name,item in adf_test[4].items():
+        results_adf['Critical value (%s)' %name]=item
+    return results_adf
+
+#平稳性处理:滑动平均+1阶差分
+def difference(ts,window=12,delta_length=5):
+    rollmean=[]
+    res_sta=test_Stationarity(ts)
+    diff_flag=False
+    if res_sta[1]<.05:
+        return diff_flag,ts,rollmean
+    else:
+        roll_mean=ts.rolling(window=window).mean()
+        roll_mean.dropna(inplace=True)
+        diff1=roll_mean.diff(delta_length)
+        diff1.dropna(inplace=True)
+        diff_flag=True
+        return diff_flag,diff1,roll_mean
+    
+#平稳性处理后的数据还原
+def rec_diff(ts,roll_mean,predicted_ts,window):
+    #一阶差分还原
+#     roll_mean=pd.Series(roll_mean)
+    ts=pd.Series(ts)
+    diff_shift_ts=roll_mean.shift(5)
+    diff_recover1=predicted_ts.add(diff_shift_ts)
+    #滑动平均还原
+    roll_sum=ts.rolling(window=window-1).sum()
+    roll_recover=diff_recover1*window-roll_sum.shift(1)
+    return roll_recover
+    
+    
+df=pd.read_csv('D:/Projects/zhuantai/zhuantai-data-demo/zhuantai-data-utf8.csv',encoding='utf-8',index_col='副导头（卫星时间）')
+# 删除数据特别大的行
+#先清理转台角速度
+delete_index=df[df['转台角速度']==9999999999].index
+df.drop(delete_index,inplace=True)                      ### 'index=delete_index'报错
+# print(df.head(5))
+
+#dataframe的index有重复值，去掉
+df=df[~df.index.duplicated(keep='first')]
+# print(df.head(5))
+
+df.index=pd.to_datetime(df.index)
+ts=df['电机温度']
+
+
+#重新采样
+# ts=ts.resample('5min',how='last').asfreq('5min')
+# ts.fillna(method='bfill',inplace=True)
+    
+#调用函数去噪
+# my_Wavelets(ts,wavefunc='db1',ln=4,m=3,n=4)
+#从结果来看，小波去噪效果不算好，主要原因是原数据噪声不明显，而且已经降采样过了,降采样方法可以选择mean或者first/last等
+
+#调用函数预测
+predict_with_Wavelets(ts, predit_length=20)
